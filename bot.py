@@ -15,15 +15,12 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 if not BOT_TOKEN:
     sys.exit("BOT_TOKEN missing")
 
-# =========================
-# WEBHOOK OFF
-# =========================
 requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # =========================
-# STORAGE (IN-MEMORY)
+# STORAGE (in-memory)
 # =========================
 users = {}
 favorites = {}
@@ -34,8 +31,19 @@ last_links = {}
 # =========================
 TEXT = {
     "ru": {
-        "welcome": "👋 <b>Привет!</b>\n\nПришли ссылку на YouTube.\nЯ скачаю видео или аудио.",
-        "choose": "🔽 Что скачать?",
+        "hero_title": "🎬 <b>YouTube Downloader</b>",
+        "hero_text": (
+            "Добро пожаловать!\n\n"
+            "Я помогу тебе:\n"
+            "• 🎥 скачать видео\n"
+            "• 🎵 сохранить аудио\n"
+            "• 📊 выбрать качество\n"
+            "• 📥 загрузить плейлисты\n\n"
+            "Просто начни 👇"
+        ),
+        "menu": "Выбери действие:",
+        "send_link": "🔗 Пришли ссылку на YouTube",
+        "choose": "Что скачать?",
         "quality": "📊 Выбери качество:",
         "downloading": "⏳ Скачиваю…",
         "sending": "📤 Отправляю файл…",
@@ -43,10 +51,23 @@ TEXT = {
         "no_link": "Сначала пришли ссылку 🙂",
         "fav_added": "⭐ Добавлено в избранное",
         "fav_empty": "Избранного пока нет",
+        "back": "🏠 В главное меню",
+        "lang_switched": "Язык переключён",
     },
     "en": {
-        "welcome": "👋 <b>Hello!</b>\n\nSend a YouTube link.\nI’ll download video or audio.",
-        "choose": "🔽 What to download?",
+        "hero_title": "🎬 <b>YouTube Downloader</b>",
+        "hero_text": (
+            "Welcome!\n\n"
+            "I can help you:\n"
+            "• 🎥 download videos\n"
+            "• 🎵 extract audio\n"
+            "• 📊 choose quality\n"
+            "• 📥 download playlists\n\n"
+            "Just start 👇"
+        ),
+        "menu": "Choose an action:",
+        "send_link": "🔗 Send YouTube link",
+        "choose": "What to download?",
         "quality": "📊 Choose quality:",
         "downloading": "⏳ Downloading…",
         "sending": "📤 Sending file…",
@@ -54,15 +75,16 @@ TEXT = {
         "no_link": "Send a link first 🙂",
         "fav_added": "⭐ Added to favorites",
         "fav_empty": "No favorites yet",
+        "back": "🏠 Main menu",
+        "lang_switched": "Language switched",
     }
 }
 
 def t(uid, key):
-    lang = users.get(uid, {}).get("lang", "ru")
-    return TEXT[lang][key]
+    return TEXT[users.get(uid, {}).get("lang", "ru")][key]
 
 # =========================
-# YT-DLP
+# YT-DLP (no ffmpeg)
 # =========================
 YDL_BASE = {
     "quiet": True,
@@ -74,43 +96,69 @@ YDL_BASE = {
 # =========================
 # KEYBOARDS
 # =========================
-def main_kb(uid):
-    kb = types.InlineKeyboardMarkup()
+def hero_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("🎥 Video", callback_data="video"),
-        types.InlineKeyboardButton("🎵 Audio", callback_data="audio"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("⭐ Favorites", callback_data="favorites"),
-        types.InlineKeyboardButton("🌍 RU/EN", callback_data="lang"),
+        types.InlineKeyboardButton("🔗 Скачать с YouTube", callback_data="action_download"),
+        types.InlineKeyboardButton("⭐ Избранное", callback_data="favorites"),
+        types.InlineKeyboardButton("🌍 RU / EN", callback_data="lang"),
     )
     return kb
 
-def quality_kb():
+def back_keyboard():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🏠 В главное меню", callback_data="home"))
+    return kb
+
+def format_keyboard():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("🎥 Видео", callback_data="video"),
+        types.InlineKeyboardButton("🎵 Аудио", callback_data="audio"),
+    )
+    return kb
+
+def quality_keyboard():
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton("360p", callback_data="q_360"),
         types.InlineKeyboardButton("720p", callback_data="q_720"),
         types.InlineKeyboardButton("1080p", callback_data="q_1080"),
     )
+    kb.add(types.InlineKeyboardButton("🏠 В главное меню", callback_data="home"))
     return kb
 
 # =========================
-# START / FIRST TOUCH
+# HERO / START SCREEN
 # =========================
+def show_hero(chat_id):
+    bot.send_message(
+        chat_id,
+        f"{t(chat_id,'hero_title')}\n\n{t(chat_id,'hero_text')}",
+        reply_markup=hero_keyboard()
+    )
+
 @bot.message_handler(commands=["start"])
-@bot.message_handler(func=lambda m: m.chat.id not in users)
-def welcome(message):
+def start(message):
     users.setdefault(message.chat.id, {"lang": "ru"})
-    bot.send_message(message.chat.id, t(message.chat.id, "welcome"), reply_markup=main_kb(message.chat.id))
+    show_hero(message.chat.id)
+
+@bot.message_handler(func=lambda m: m.chat.id not in users)
+def first_touch(message):
+    users[message.chat.id] = {"lang": "ru"}
+    show_hero(message.chat.id)
 
 # =========================
-# LINK HANDLER
+# LINK
 # =========================
 @bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
 def link(message):
     last_links[message.chat.id] = message.text
-    bot.send_message(message.chat.id, t(message.chat.id, "choose"), reply_markup=main_kb(message.chat.id))
+    bot.send_message(
+        message.chat.id,
+        t(message.chat.id, "choose"),
+        reply_markup=format_keyboard()
+    )
 
 # =========================
 # CALLBACKS
@@ -119,17 +167,23 @@ def link(message):
 def callbacks(call):
     uid = call.message.chat.id
 
-    if call.data == "lang":
+    if call.data == "home":
+        show_hero(uid)
+
+    elif call.data == "lang":
         users[uid]["lang"] = "en" if users[uid]["lang"] == "ru" else "ru"
-        bot.answer_callback_query(call.id, "OK")
-        bot.send_message(uid, t(uid, "welcome"), reply_markup=main_kb(uid))
+        bot.answer_callback_query(call.id, t(uid, "lang_switched"))
+        show_hero(uid)
 
     elif call.data == "favorites":
         fav = favorites.get(uid, [])
         if not fav:
-            bot.send_message(uid, t(uid, "fav_empty"))
+            bot.send_message(uid, t(uid, "fav_empty"), reply_markup=back_keyboard())
         else:
-            bot.send_message(uid, "\n".join(fav))
+            bot.send_message(uid, "\n\n".join(fav), reply_markup=back_keyboard())
+
+    elif call.data == "action_download":
+        bot.send_message(uid, t(uid, "send_link"), reply_markup=back_keyboard())
 
     elif call.data in ("video", "audio"):
         if uid not in last_links:
@@ -137,7 +191,7 @@ def callbacks(call):
             return
         users[uid]["mode"] = call.data
         if call.data == "video":
-            bot.send_message(uid, t(uid, "quality"), reply_markup=quality_kb())
+            bot.send_message(uid, t(uid, "quality"), reply_markup=quality_keyboard())
         else:
             download(uid, "audio", None)
 
@@ -167,18 +221,19 @@ def download(uid, mode, quality):
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            files = ydl.prepare_filename(info)
+            file = ydl.prepare_filename(info)
 
         bot.edit_message_text(t(uid, "sending"), uid, status.message_id)
 
-        with open(files, "rb") as f:
+        with open(file, "rb") as f:
             if mode == "audio":
                 bot.send_audio(uid, f)
             else:
                 bot.send_video(uid, f)
 
         favorites.setdefault(uid, []).append(url)
-        os.remove(files)
+        os.remove(file)
+
         bot.edit_message_text(t(uid, "done"), uid, status.message_id)
 
     except Exception as e:
@@ -197,17 +252,10 @@ def admin(message):
     )
 
 # =========================
-# FALLBACK
-# =========================
-@bot.message_handler(func=lambda m: True)
-def fallback(message):
-    bot.send_message(message.chat.id, t(message.chat.id, "welcome"), reply_markup=main_kb(message.chat.id))
-
-# =========================
 # POLLING
 # =========================
 while True:
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except Exception as e:
+    except Exception:
         time.sleep(5)
