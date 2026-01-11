@@ -5,6 +5,7 @@ import requests
 import telebot
 from telebot import types
 import yt_dlp
+from datetime import datetime, timedelta
 
 # ==================================================
 # ENV
@@ -23,14 +24,15 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 # ==================================================
 MAX_FILE_MB = 49
 DOWNLOAD_DIR = "downloads"
+FILE_TTL_MINUTES = 15
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ==================================================
 # MEMORY
 # ==================================================
-users = {}
 last_links = {}
-favorites = {}
+link_info = {}
+download_counter = 0
 
 # ==================================================
 # TEXT
@@ -38,51 +40,44 @@ favorites = {}
 TEXT = {
     "hero": (
         "🌿 <b>Добро пожаловать</b>\n\n"
-        "Я спокойно помогу скачать видео или аудио с YouTube.\n\n"
-        "Нажми кнопку ниже — и просто вставь ссылку 🤍"
+        "Я помогу скачать видео или музыку с YouTube.\n"
+        "Просто вставь ссылку 🤍"
     ),
-    "ask_link": "🔗 Пожалуйста, вставь ссылку на YouTube",
-    "choose_format": "Что ты хочешь скачать?",
-    "choose_quality": "Выбери качество:",
-    "downloading": "⏳ Я начинаю загрузку…\nПожалуйста, подожди.",
+    "ask_link": "🔗 Вставь ссылку на YouTube",
+    "choose_format": "Что будем скачивать?",
+    "downloading": "⏳ Загружаю, пожалуйста подожди…",
     "sending": "📤 Отправляю файл…",
     "done": "✅ Готово!\n\nЕсли хочешь — пришли следующую ссылку 🙂",
     "too_big": (
         "😔 <b>Файл слишком большой</b>\n\n"
-        "Telegram не позволяет ботам отправлять такие объёмы.\n"
         "Попробуй выбрать качество ниже."
     ),
-    "no_link": "Сначала пришли ссылку 🙂",
-    "unknown": (
-        "🤍 Я здесь, чтобы помогать.\n\n"
-        "Просто пришли ссылку на YouTube."
-    ),
+    "unknown": "Я жду ссылку на YouTube 🙂",
 }
 
 # ==================================================
-# YT-DLP
+# YT-DLP BASE
 # ==================================================
 YDL_BASE = {
     "quiet": True,
+    "nocheckcertificate": True,
     "retries": 5,
     "socket_timeout": 30,
-    "nocheckcertificate": True,
 }
 
 # ==================================================
 # KEYBOARDS
 # ==================================================
-def start_keyboard():
+def format_keyboard(suggest_audio=False):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🚀 Начать", callback_data="start_bot"))
-    return kb
-
-def format_keyboard():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("🎥 Видео", callback_data="video"),
-        types.InlineKeyboardButton("🎵 Аудио", callback_data="audio"),
-    )
+    if suggest_audio:
+        kb.add(types.InlineKeyboardButton("🎵 Скачать аудио (рекомендовано)", callback_data="audio"))
+        kb.add(types.InlineKeyboardButton("🎥 Скачать видео", callback_data="video"))
+    else:
+        kb.add(
+            types.InlineKeyboardButton("🎥 Скачать видео", callback_data="video"),
+            types.InlineKeyboardButton("🎵 Скачать аудио", callback_data="audio"),
+        )
     return kb
 
 def quality_keyboard():
@@ -101,54 +96,74 @@ def typing(chat_id, sec=1.0):
     bot.send_chat_action(chat_id, "typing")
     time.sleep(sec)
 
+def cleanup_files():
+    now = datetime.now()
+    for file in os.listdir(DOWNLOAD_DIR):
+        path = os.path.join(DOWNLOAD_DIR, file)
+        if os.path.isfile(path):
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+            if now - mtime > timedelta(minutes=FILE_TTL_MINUTES):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+def smart_detect(info):
+    title = info.get("title", "").lower()
+    duration = info.get("duration", 0)
+    width = info.get("width", 0)
+    height = info.get("height", 0)
+
+    if "audio" in title or "official audio" in title:
+        return True
+    if duration and duration < 180:
+        return True
+    if height and width and height > width:
+        return True
+
+    return False
+
 # ==================================================
 # START
 # ==================================================
 @bot.message_handler(commands=["start"])
 def start(message):
-    users.setdefault(message.chat.id, {})
     typing(message.chat.id)
-    bot.send_message(message.chat.id, TEXT["hero"], reply_markup=start_keyboard())
-
-# ==================================================
-# START BUTTON
-# ==================================================
-@bot.callback_query_handler(func=lambda c: c.data == "start_bot")
-def start_button(call):
-    uid = call.message.chat.id
-    typing(uid)
-    bot.edit_message_text("✨ Отлично, начинаем!", uid, call.message.message_id)
-    typing(uid)
-    bot.send_message(uid, TEXT["ask_link"])
+    bot.send_message(message.chat.id, TEXT["hero"])
+    typing(message.chat.id)
+    bot.send_message(message.chat.id, TEXT["ask_link"])
 
 # ==================================================
 # LINK HANDLER
 # ==================================================
 @bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
 def handle_link(message):
-    last_links[message.chat.id] = message.text
-    typing(message.chat.id)
+    uid = message.chat.id
+    last_links[uid] = message.text
+
+    typing(uid)
+
+    with yt_dlp.YoutubeDL({**YDL_BASE, "skip_download": True}) as ydl:
+        info = ydl.extract_info(message.text, download=False)
+        link_info[uid] = info
+
+    suggest_audio = smart_detect(info)
+
     bot.send_message(
-        message.chat.id,
+        uid,
         TEXT["choose_format"],
-        reply_markup=format_keyboard()
+        reply_markup=format_keyboard(suggest_audio)
     )
 
 # ==================================================
-# CALLBACKS (FORMAT / QUALITY)
+# CALLBACKS
 # ==================================================
 @bot.callback_query_handler(func=lambda c: c.data in ("video", "audio"))
 def format_choice(call):
     uid = call.message.chat.id
 
-    if uid not in last_links:
-        bot.answer_callback_query(call.id, TEXT["no_link"])
-        return
-
-    users[uid]["mode"] = call.data
-
     if call.data == "video":
-        bot.send_message(uid, TEXT["choose_quality"], reply_markup=quality_keyboard())
+        bot.send_message(uid, "📊 Выбери качество:", reply_markup=quality_keyboard())
     else:
         download(uid, "audio", None)
 
@@ -162,7 +177,14 @@ def quality_choice(call):
 # DOWNLOAD
 # ==================================================
 def download(uid, mode, quality):
-    url = last_links[uid]
+    global download_counter
+    cleanup_files()
+
+    url = last_links.get(uid)
+    if not url:
+        bot.send_message(uid, TEXT["unknown"])
+        return
+
     typing(uid)
     status = bot.send_message(uid, TEXT["downloading"])
 
@@ -197,13 +219,17 @@ def download(uid, mode, quality):
             else:
                 bot.send_video(uid, f)
 
-        favorites.setdefault(uid, []).append(url)
+        download_counter += 1
+
         os.remove(file_path)
-
-        bot.edit_message_text(TEXT["done"], uid, status.message_id)
-
-        # сбрасываем ссылку, чтобы не было повторов
         last_links.pop(uid, None)
+        link_info.pop(uid, None)
+
+        bot.edit_message_text(
+            TEXT["done"] + f"\n\n📊 Всего скачиваний: <b>{download_counter}</b>",
+            uid,
+            status.message_id
+        )
 
     except Exception as e:
         bot.edit_message_text(f"❌ {e}", uid, status.message_id)
