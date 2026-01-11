@@ -50,6 +50,7 @@ YDL_BASE = {
     "retries": 10,
     "socket_timeout": 30,
     "nocheckcertificate": True,
+    "ffmpeg_location": "/usr/bin/ffmpeg",
     "http_headers": {
         "User-Agent": "Mozilla/5.0"
     }
