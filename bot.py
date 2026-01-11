@@ -6,86 +6,67 @@ import telebot
 from telebot import types
 import yt_dlp
 
-# =========================
+# ==================================================
 # ENV
-# =========================
+# ==================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not BOT_TOKEN:
-    sys.exit("BOT_TOKEN missing")
+    sys.exit("BOT_TOKEN is missing")
 
-requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+# выключаем webhook на всякий случай
+requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# =========================
-# STORAGE (in-memory)
-# =========================
-users = {}
-favorites = {}
-last_links = {}
+# ==================================================
+# CONSTANTS
+# ==================================================
+MAX_FILE_MB = 49
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# =========================
-# I18N
-# =========================
+# ==================================================
+# MEMORY (Railway free friendly)
+# ==================================================
+users = {}
+last_links = {}
+favorites = {}
+
+# ==================================================
+# TEXT STYLE (character & tone)
+# ==================================================
 TEXT = {
-    "ru": {
-        "hero_title": "🎬 <b>YouTube Downloader</b>",
-        "hero_text": (
-            "Добро пожаловать!\n\n"
-            "Я помогу тебе:\n"
-            "• 🎥 скачать видео\n"
-            "• 🎵 сохранить аудио\n"
-            "• 📊 выбрать качество\n"
-            "• 📥 загрузить плейлисты\n\n"
-            "Просто начни 👇"
-        ),
-        "menu": "Выбери действие:",
-        "send_link": "🔗 Пришли ссылку на YouTube",
-        "choose": "Что скачать?",
-        "quality": "📊 Выбери качество:",
-        "downloading": "⏳ Скачиваю…",
-        "sending": "📤 Отправляю файл…",
-        "done": "✅ Готово",
-        "no_link": "Сначала пришли ссылку 🙂",
-        "fav_added": "⭐ Добавлено в избранное",
-        "fav_empty": "Избранного пока нет",
-        "back": "🏠 В главное меню",
-        "lang_switched": "Язык переключён",
-    },
-    "en": {
-        "hero_title": "🎬 <b>YouTube Downloader</b>",
-        "hero_text": (
-            "Welcome!\n\n"
-            "I can help you:\n"
-            "• 🎥 download videos\n"
-            "• 🎵 extract audio\n"
-            "• 📊 choose quality\n"
-            "• 📥 download playlists\n\n"
-            "Just start 👇"
-        ),
-        "menu": "Choose an action:",
-        "send_link": "🔗 Send YouTube link",
-        "choose": "What to download?",
-        "quality": "📊 Choose quality:",
-        "downloading": "⏳ Downloading…",
-        "sending": "📤 Sending file…",
-        "done": "✅ Done",
-        "no_link": "Send a link first 🙂",
-        "fav_added": "⭐ Added to favorites",
-        "fav_empty": "No favorites yet",
-        "back": "🏠 Main menu",
-        "lang_switched": "Language switched",
-    }
+    "welcome": (
+        "🌿 <b>Добро пожаловать</b>\n\n"
+        "Я спокойный и вежливый бот 🤍\n"
+        "Помогаю скачивать видео и аудио с YouTube.\n\n"
+        "Просто пришли ссылку — я всё сделаю аккуратно и без спешки."
+    ),
+    "menu": "Выбери, пожалуйста, что ты хочешь сделать 👇",
+    "ask_link": "🔗 Пришли ссылку на видео или плейлист YouTube",
+    "choose_format": "Что именно нужно скачать?",
+    "choose_quality": "Выбери подходящее качество:",
+    "downloading": "⏳ Я начинаю загрузку…\nПожалуйста, подожди немного.",
+    "sending": "📤 Почти готово… Отправляю файл.",
+    "done": "✅ Готово! Если нужно ещё что-нибудь — я рядом 🙂",
+    "too_big": (
+        "😔 <b>Файл получился слишком большим</b>\n\n"
+        "Telegram не позволяет ботам отправлять такие объёмы.\n"
+        "Попробуй выбрать качество пониже — так всё получится."
+    ),
+    "no_link": "Я пока не вижу ссылку. Просто пришли её сообщением 🙂",
+    "unknown": (
+        "🤍 Я тебя понял.\n\n"
+        "Пока я умею работать с YouTube-ссылками.\n"
+        "Если что — просто пришли ссылку, и я помогу."
+    ),
 }
 
-def t(uid, key):
-    return TEXT[users.get(uid, {}).get("lang", "ru")][key]
-
-# =========================
-# YT-DLP (no ffmpeg)
-# =========================
+# ==================================================
+# YT-DLP (без ffmpeg, стабильно)
+# ==================================================
 YDL_BASE = {
     "quiet": True,
     "retries": 5,
@@ -93,118 +74,108 @@ YDL_BASE = {
     "nocheckcertificate": True,
 }
 
-# =========================
-# KEYBOARDS
-# =========================
-def hero_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🔗 Скачать с YouTube", callback_data="action_download"),
-        types.InlineKeyboardButton("⭐ Избранное", callback_data="favorites"),
-        types.InlineKeyboardButton("🌍 RU / EN", callback_data="lang"),
-    )
-    return kb
-
-def back_keyboard():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🏠 В главное меню", callback_data="home"))
-    return kb
-
-def format_keyboard():
-    kb = types.InlineKeyboardMarkup()
+# ==================================================
+# UI KEYBOARDS
+# ==================================================
+def main_menu():
+    kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🎥 Видео", callback_data="video"),
         types.InlineKeyboardButton("🎵 Аудио", callback_data="audio"),
     )
+    kb.add(
+        types.InlineKeyboardButton("⭐ Избранное", callback_data="favorites"),
+    )
     return kb
 
-def quality_keyboard():
-    kb = types.InlineKeyboardMarkup()
+
+def quality_menu():
+    kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
         types.InlineKeyboardButton("360p", callback_data="q_360"),
         types.InlineKeyboardButton("720p", callback_data="q_720"),
         types.InlineKeyboardButton("1080p", callback_data="q_1080"),
     )
-    kb.add(types.InlineKeyboardButton("🏠 В главное меню", callback_data="home"))
     return kb
 
-# =========================
-# HERO / START SCREEN
-# =========================
-def show_hero(chat_id):
-    bot.send_message(
-        chat_id,
-        f"{t(chat_id,'hero_title')}\n\n{t(chat_id,'hero_text')}",
-        reply_markup=hero_keyboard()
-    )
 
+# ==================================================
+# HELPERS
+# ==================================================
+def typing(chat_id, sec=1.2):
+    bot.send_chat_action(chat_id, "typing")
+    time.sleep(sec)
+
+
+# ==================================================
+# START / FIRST CONTACT
+# ==================================================
 @bot.message_handler(commands=["start"])
 def start(message):
-    users.setdefault(message.chat.id, {"lang": "ru"})
-    show_hero(message.chat.id)
+    users.setdefault(message.chat.id, {})
+    typing(message.chat.id)
+    bot.send_message(message.chat.id, TEXT["welcome"])
+    typing(message.chat.id, 0.8)
+    bot.send_message(message.chat.id, TEXT["menu"], reply_markup=main_menu())
+
 
 @bot.message_handler(func=lambda m: m.chat.id not in users)
 def first_touch(message):
-    users[message.chat.id] = {"lang": "ru"}
-    show_hero(message.chat.id)
+    users[message.chat.id] = {}
+    start(message)
 
-# =========================
-# LINK
-# =========================
+
+# ==================================================
+# LINK HANDLER
+# ==================================================
 @bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
-def link(message):
+def handle_link(message):
     last_links[message.chat.id] = message.text
+    typing(message.chat.id)
     bot.send_message(
         message.chat.id,
-        t(message.chat.id, "choose"),
-        reply_markup=format_keyboard()
+        TEXT["choose_format"],
+        reply_markup=main_menu()
     )
 
-# =========================
+
+# ==================================================
 # CALLBACKS
-# =========================
+# ==================================================
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(call):
     uid = call.message.chat.id
 
-    if call.data == "home":
-        show_hero(uid)
-
-    elif call.data == "lang":
-        users[uid]["lang"] = "en" if users[uid]["lang"] == "ru" else "ru"
-        bot.answer_callback_query(call.id, t(uid, "lang_switched"))
-        show_hero(uid)
-
-    elif call.data == "favorites":
+    if call.data == "favorites":
         fav = favorites.get(uid, [])
         if not fav:
-            bot.send_message(uid, t(uid, "fav_empty"), reply_markup=back_keyboard())
+            bot.send_message(uid, "⭐ Избранного пока нет.")
         else:
-            bot.send_message(uid, "\n\n".join(fav), reply_markup=back_keyboard())
+            bot.send_message(uid, "⭐ <b>Избранное:</b>\n\n" + "\n\n".join(fav))
+        return
 
-    elif call.data == "action_download":
-        bot.send_message(uid, t(uid, "send_link"), reply_markup=back_keyboard())
-
-    elif call.data in ("video", "audio"):
+    if call.data in ("video", "audio"):
         if uid not in last_links:
-            bot.answer_callback_query(call.id, t(uid, "no_link"))
+            bot.answer_callback_query(call.id, TEXT["no_link"])
             return
         users[uid]["mode"] = call.data
         if call.data == "video":
-            bot.send_message(uid, t(uid, "quality"), reply_markup=quality_keyboard())
+            bot.send_message(uid, TEXT["choose_quality"], reply_markup=quality_menu())
         else:
             download(uid, "audio", None)
 
     elif call.data.startswith("q_"):
-        q = call.data.split("_")[1]
-        download(uid, "video", q)
+        quality = call.data.split("_")[1]
+        download(uid, "video", quality)
 
-# =========================
-# DOWNLOAD
-# =========================
+
+# ==================================================
+# DOWNLOAD CORE
+# ==================================================
 def download(uid, mode, quality):
     url = last_links[uid]
-    status = bot.send_message(uid, t(uid, "downloading"))
+    typing(uid)
+    status = bot.send_message(uid, TEXT["downloading"])
 
     try:
         if mode == "video":
@@ -215,45 +186,50 @@ def download(uid, mode, quality):
         opts = {
             **YDL_BASE,
             "format": fmt,
-            "outtmpl": "downloads/%(title)s.%(ext)s",
-            "noplaylist": False,
+            "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
         }
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            file = ydl.prepare_filename(info)
+            file_path = ydl.prepare_filename(info)
 
-        bot.edit_message_text(t(uid, "sending"), uid, status.message_id)
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-        with open(file, "rb") as f:
+        if size_mb > MAX_FILE_MB:
+            os.remove(file_path)
+            bot.edit_message_text(TEXT["too_big"], uid, status.message_id)
+            return
+
+        bot.edit_message_text(TEXT["sending"], uid, status.message_id)
+        typing(uid, 1.5)
+
+        with open(file_path, "rb") as f:
             if mode == "audio":
                 bot.send_audio(uid, f)
             else:
                 bot.send_video(uid, f)
 
         favorites.setdefault(uid, []).append(url)
-        os.remove(file)
+        os.remove(file_path)
 
-        bot.edit_message_text(t(uid, "done"), uid, status.message_id)
+        bot.edit_message_text(TEXT["done"], uid, status.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ {e}", uid, status.message_id)
 
-# =========================
-# ADMIN
-# =========================
-@bot.message_handler(commands=["admin"])
-def admin(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    bot.send_message(
-        message.chat.id,
-        f"👑 Admin\n\nUsers: {len(users)}\nFavorites: {sum(len(v) for v in favorites.values())}"
-    )
 
-# =========================
-# POLLING
-# =========================
+# ==================================================
+# FALLBACK (polite personality)
+# ==================================================
+@bot.message_handler(func=lambda m: True)
+def fallback(message):
+    typing(message.chat.id)
+    bot.send_message(message.chat.id, TEXT["unknown"])
+
+
+# ==================================================
+# POLLING (SAFE LOOP)
+# ==================================================
 while True:
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
