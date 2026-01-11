@@ -43,14 +43,13 @@ user_links = {}
 print("BOT INITIALIZED")
 
 # =========================
-# YT-DLP BASE OPTIONS
+# YT-DLP OPTIONS (NO FFMPEG)
 # =========================
 YDL_BASE = {
     "quiet": True,
     "retries": 10,
     "socket_timeout": 30,
     "nocheckcertificate": True,
-    "ffmpeg_location": "/usr/bin/ffmpeg",
     "http_headers": {
         "User-Agent": "Mozilla/5.0"
     }
@@ -67,7 +66,7 @@ def start_handler(message):
         "Привет!\n\n"
         "Отправь ссылку на YouTube, а я скачаю:\n"
         "🎥 Видео (MP4)\n"
-        "🎵 Аудио (MP3)"
+        "🎵 Аудио (M4A)"
     )
 
 
@@ -79,7 +78,7 @@ def link_handler(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton("🎥 Видео (MP4)", callback_data="video"),
-        types.InlineKeyboardButton("🎵 Аудио (MP3)", callback_data="audio")
+        types.InlineKeyboardButton("🎵 Аудио (M4A)", callback_data="audio")
     )
 
     bot.send_message(message.chat.id, "Что скачать?", reply_markup=kb)
@@ -100,30 +99,23 @@ def download_handler(call):
 
     try:
         if call.data == "video":
+            # ГОТОВЫЙ MP4, без склеивания
             opts = {
                 **YDL_BASE,
-                "format": "bestvideo+bestaudio/best",
-                "merge_output_format": "mp4",
+                "format": "best[ext=mp4]/best",
                 "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
             }
         else:
+            # ГОТОВОЕ АУДИО (M4A / WEBM), без конвертации
             opts = {
                 **YDL_BASE,
-                "format": "bestaudio/best",
+                "format": "bestaudio[ext=m4a]/bestaudio",
                 "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
             }
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-
-            if call.data == "audio":
-                filename = filename.rsplit(".", 1)[0] + ".mp3"
 
         print("FILE READY:", filename)
 
@@ -142,7 +134,7 @@ def download_handler(call):
 
 
 # =========================
-# START POLLING
+# START POLLING (SAFE LOOP)
 # =========================
 print("STARTING POLLING...")
 
