@@ -7,143 +7,207 @@ from telebot import types
 import yt_dlp
 
 # =========================
-# TOKEN CHECK
+# ENV
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not BOT_TOKEN:
-    print("FATAL: BOT_TOKEN is not set")
-    sys.exit(1)
-
-print("BOT TOKEN FOUND")
+    sys.exit("BOT_TOKEN missing")
 
 # =========================
-# FORCE DELETE WEBHOOK
+# WEBHOOK OFF
 # =========================
-print("DELETING WEBHOOK...")
-try:
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-        timeout=10
-    )
-    print("deleteWebhook response:", r.text)
-except Exception as e:
-    print("Webhook delete error:", e)
+requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
 
-# =========================
-# BOT INIT
-# =========================
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-user_links = {}
-
-print("BOT INITIALIZED")
+# =========================
+# STORAGE (IN-MEMORY)
+# =========================
+users = {}
+favorites = {}
+last_links = {}
 
 # =========================
-# YT-DLP OPTIONS (NO FFMPEG)
+# I18N
 # =========================
-YDL_BASE = {
-    "quiet": True,
-    "retries": 10,
-    "socket_timeout": 30,
-    "nocheckcertificate": True,
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0"
+TEXT = {
+    "ru": {
+        "welcome": "👋 <b>Привет!</b>\n\nПришли ссылку на YouTube.\nЯ скачаю видео или аудио.",
+        "choose": "🔽 Что скачать?",
+        "quality": "📊 Выбери качество:",
+        "downloading": "⏳ Скачиваю…",
+        "sending": "📤 Отправляю файл…",
+        "done": "✅ Готово",
+        "no_link": "Сначала пришли ссылку 🙂",
+        "fav_added": "⭐ Добавлено в избранное",
+        "fav_empty": "Избранного пока нет",
+    },
+    "en": {
+        "welcome": "👋 <b>Hello!</b>\n\nSend a YouTube link.\nI’ll download video or audio.",
+        "choose": "🔽 What to download?",
+        "quality": "📊 Choose quality:",
+        "downloading": "⏳ Downloading…",
+        "sending": "📤 Sending file…",
+        "done": "✅ Done",
+        "no_link": "Send a link first 🙂",
+        "fav_added": "⭐ Added to favorites",
+        "fav_empty": "No favorites yet",
     }
 }
 
+def t(uid, key):
+    lang = users.get(uid, {}).get("lang", "ru")
+    return TEXT[lang][key]
+
 # =========================
-# HANDLERS
+# YT-DLP
 # =========================
-@bot.message_handler(commands=["start"])
-def start_handler(message):
-    print("START COMMAND RECEIVED")
-    bot.send_message(
-        message.chat.id,
-        "Привет!\n\n"
-        "Отправь ссылку на YouTube, а я скачаю:\n"
-        "🎥 Видео (MP4)\n"
-        "🎵 Аудио (M4A)"
-    )
+YDL_BASE = {
+    "quiet": True,
+    "retries": 5,
+    "socket_timeout": 30,
+    "nocheckcertificate": True,
+}
 
-
-@bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
-def link_handler(message):
-    print("YOUTUBE LINK RECEIVED:", message.text)
-    user_links[message.chat.id] = message.text
-
+# =========================
+# KEYBOARDS
+# =========================
+def main_kb(uid):
     kb = types.InlineKeyboardMarkup()
     kb.add(
-        types.InlineKeyboardButton("🎥 Видео (MP4)", callback_data="video"),
-        types.InlineKeyboardButton("🎵 Аудио (M4A)", callback_data="audio")
+        types.InlineKeyboardButton("🎥 Video", callback_data="video"),
+        types.InlineKeyboardButton("🎵 Audio", callback_data="audio"),
     )
+    kb.add(
+        types.InlineKeyboardButton("⭐ Favorites", callback_data="favorites"),
+        types.InlineKeyboardButton("🌍 RU/EN", callback_data="lang"),
+    )
+    return kb
 
-    bot.send_message(message.chat.id, "Что скачать?", reply_markup=kb)
+def quality_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("360p", callback_data="q_360"),
+        types.InlineKeyboardButton("720p", callback_data="q_720"),
+        types.InlineKeyboardButton("1080p", callback_data="q_1080"),
+    )
+    return kb
 
+# =========================
+# START / FIRST TOUCH
+# =========================
+@bot.message_handler(commands=["start"])
+@bot.message_handler(func=lambda m: m.chat.id not in users)
+def welcome(message):
+    users.setdefault(message.chat.id, {"lang": "ru"})
+    bot.send_message(message.chat.id, t(message.chat.id, "welcome"), reply_markup=main_kb(message.chat.id))
 
-@bot.callback_query_handler(func=lambda call: call.data in ("video", "audio"))
-def download_handler(call):
-    chat_id = call.message.chat.id
-    url = user_links.get(chat_id)
+# =========================
+# LINK HANDLER
+# =========================
+@bot.message_handler(func=lambda m: m.text and ("youtube.com" in m.text or "youtu.be" in m.text))
+def link(message):
+    last_links[message.chat.id] = message.text
+    bot.send_message(message.chat.id, t(message.chat.id, "choose"), reply_markup=main_kb(message.chat.id))
 
-    print("DOWNLOAD REQUEST:", call.data, url)
+# =========================
+# CALLBACKS
+# =========================
+@bot.callback_query_handler(func=lambda c: True)
+def callbacks(call):
+    uid = call.message.chat.id
 
-    if not url:
-        bot.send_message(chat_id, "❌ Ссылка не найдена. Отправь её заново.")
-        return
+    if call.data == "lang":
+        users[uid]["lang"] = "en" if users[uid]["lang"] == "ru" else "ru"
+        bot.answer_callback_query(call.id, "OK")
+        bot.send_message(uid, t(uid, "welcome"), reply_markup=main_kb(uid))
 
-    bot.send_message(chat_id, "⏳ Скачиваю, подожди...")
+    elif call.data == "favorites":
+        fav = favorites.get(uid, [])
+        if not fav:
+            bot.send_message(uid, t(uid, "fav_empty"))
+        else:
+            bot.send_message(uid, "\n".join(fav))
+
+    elif call.data in ("video", "audio"):
+        if uid not in last_links:
+            bot.answer_callback_query(call.id, t(uid, "no_link"))
+            return
+        users[uid]["mode"] = call.data
+        if call.data == "video":
+            bot.send_message(uid, t(uid, "quality"), reply_markup=quality_kb())
+        else:
+            download(uid, "audio", None)
+
+    elif call.data.startswith("q_"):
+        q = call.data.split("_")[1]
+        download(uid, "video", q)
+
+# =========================
+# DOWNLOAD
+# =========================
+def download(uid, mode, quality):
+    url = last_links[uid]
+    status = bot.send_message(uid, t(uid, "downloading"))
 
     try:
-        if call.data == "video":
-            # ГОТОВЫЙ MP4, без склеивания
-            opts = {
-                **YDL_BASE,
-                "format": "best[ext=mp4]/best",
-                "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
-            }
+        if mode == "video":
+            fmt = f"best[ext=mp4][height<={quality}]/best[ext=mp4]"
         else:
-            # ГОТОВОЕ АУДИО (M4A / WEBM), без конвертации
-            opts = {
-                **YDL_BASE,
-                "format": "bestaudio[ext=m4a]/bestaudio",
-                "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
-            }
+            fmt = "bestaudio[ext=m4a]/bestaudio"
+
+        opts = {
+            **YDL_BASE,
+            "format": fmt,
+            "outtmpl": "downloads/%(title)s.%(ext)s",
+            "noplaylist": False,
+        }
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            files = ydl.prepare_filename(info)
 
-        print("FILE READY:", filename)
+        bot.edit_message_text(t(uid, "sending"), uid, status.message_id)
 
-        with open(filename, "rb") as f:
-            if call.data == "audio":
-                bot.send_audio(chat_id, f)
+        with open(files, "rb") as f:
+            if mode == "audio":
+                bot.send_audio(uid, f)
             else:
-                bot.send_video(chat_id, f)
+                bot.send_video(uid, f)
 
-        os.remove(filename)
-        print("FILE SENT AND REMOVED")
+        favorites.setdefault(uid, []).append(url)
+        os.remove(files)
+        bot.edit_message_text(t(uid, "done"), uid, status.message_id)
 
     except Exception as e:
-        print("DOWNLOAD ERROR:", e)
-        bot.send_message(chat_id, f"❌ Ошибка: {e}")
-
+        bot.edit_message_text(f"❌ {e}", uid, status.message_id)
 
 # =========================
-# START POLLING (SAFE LOOP)
+# ADMIN
 # =========================
-print("STARTING POLLING...")
+@bot.message_handler(commands=["admin"])
+def admin(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    bot.send_message(
+        message.chat.id,
+        f"👑 Admin\n\nUsers: {len(users)}\nFavorites: {sum(len(v) for v in favorites.values())}"
+    )
 
+# =========================
+# FALLBACK
+# =========================
+@bot.message_handler(func=lambda m: True)
+def fallback(message):
+    bot.send_message(message.chat.id, t(message.chat.id, "welcome"), reply_markup=main_kb(message.chat.id))
+
+# =========================
+# POLLING
+# =========================
 while True:
     try:
-        bot.infinity_polling(
-            timeout=60,
-            long_polling_timeout=60
-        )
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
-        print("POLLING ERROR:", e)
         time.sleep(5)
